@@ -1,11 +1,15 @@
 -- StarterGui/FrostzGui/Main.client.lua
--- GUI "Frostz Tween+" com botões, toggle e animações
+-- GUI "Frostz Tween+" com botões, toggle, subpainel Teleguiado e animações
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local KickRE = ReplicatedStorage:WaitForChild("FrostzKick") -- RemoteEvent criado no servidor
+
+--======================== helpers UI ========================--
 local function tween(o, props, t, style, dir)
 	return TweenService:Create(o, TweenInfo.new(t or 0.2, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props)
 end
@@ -18,7 +22,7 @@ end
 local function mkCorner(parent, r) mk(parent, "UICorner", {CornerRadius = UDim.new(0, r or 12)}) end
 local function mkStroke(parent, c, th) mk(parent, "UIStroke", {Color = c or Color3.fromRGB(255,214,10), Thickness = th or 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}) end
 
--- drag helper (não muda visual)
+-- Drag sem mudar visual
 local function makeDraggable(frame, dragArea)
 	dragArea = dragArea or frame
 	local dragging, dragStart, startPos
@@ -40,10 +44,11 @@ local function makeDraggable(frame, dragArea)
 	end)
 end
 
+--======================== raiz GUI ========================--
 local gui = script.Parent :: ScreenGui
 gui.IgnoreGuiInset, gui.ResetOnSpawn = true, false
 
--- janela
+-- janela principal
 local window = mk(gui, "Frame", {
 	Name="Window", Position=UDim2.fromOffset(40,60), Size=UDim2.fromOffset(290,360),
 	BackgroundColor3=Color3.fromRGB(33,33,40)
@@ -92,14 +97,16 @@ local function makeToggle(parent, labelText)
 	local knob = mk(toggle,"Frame",{Size=UDim2.fromOffset(24,24),Position=UDim2.fromOffset(2,2),BackgroundColor3=Color3.fromRGB(120,120,125)})
 	mkCorner(knob,12)
 
+	local evt = Instance.new("BindableEvent")
 	local on=false
 	local function set(v)
 		on=v; toggle.Text=v and "ON" or "OFF"
 		tween(toggle,{BackgroundColor3=v and Colors.Pink or Color3.fromRGB(30,30,36)},.15):Play()
 		tween(knob,{Position=v and UDim2.fromOffset(38,2) or UDim2.fromOffset(2,2)},.15):Play()
+		evt:Fire(on)
 	end
 	toggle.MouseButton1Click:Connect(function() set(not on) end)
-	return frame, set, function() return on end, toggle
+	return frame, set, function() return on end, evt.Event
 end
 
 -- linha dupla (ESP GOD / ESP SECRET)
@@ -113,10 +120,7 @@ local espBase   = makeButton(body,"ESP BASE",   Colors.Pink, Colors.PinkDark)
 local espPlayer = makeButton(body,"ESP PLAYER", Colors.Gray, Color3.fromRGB(45,45,55))
 
 -- toggle + botão final
-local autoKickFrame, setAutoKick, getAutoKick = (function()
-	local f, set, get, btn = makeToggle(body,"AUTO KICK")
-	return f, set, get
-end)()
+local autoKickFrame, setAutoKick, getAutoKick, onAutoKickChanged = makeToggle(body,"AUTO KICK")
 local painel = makeButton(body,"Painel Teleguiado", Colors.Red, Colors.RedDark)
 
 -- ========= Sub-GUI: Painel Teleguiado =========
@@ -151,14 +155,17 @@ local function makeMiniToggle(parent, text)
 		BackgroundColor3=Color3.fromRGB(30,30,36), AutoButtonColor=false, Text="OFF", Font=Enum.Font.GothamBold, TextSize=13, TextColor3=Colors.Text})
 	mkCorner(b, 12)
 	local knob = mk(b, "Frame", {Size=UDim2.fromOffset(20,20), Position=UDim2.fromOffset(2,2), BackgroundColor3=Color3.fromRGB(120,120,125)}); mkCorner(knob,10)
+
+	local evt = Instance.new("BindableEvent")
 	local on = false
 	local function set(v)
 		on = v; b.Text = v and "ON" or "OFF"
 		tween(b, {BackgroundColor3 = v and Colors.Pink or Color3.fromRGB(30,30,36)}, .14):Play()
 		tween(knob, {Position = v and UDim2.fromOffset(38,2) or UDim2.fromOffset(2,2)}, .14):Play()
+		evt:Fire(on)
 	end
 	b.MouseButton1Click:Connect(function() set(not on) end)
-	return {Frame=f, Set=set, Get=function() return on end, Button=b}
+	return {Frame=f, Set=set, Get=function() return on end, Changed=evt.Event}
 end
 
 local tTele = makeMiniToggle(subBody, "TELEGUIADO")
@@ -172,43 +179,45 @@ painel.MouseButton1Click:Connect(function()
 	end
 end)
 
--- ======= Drag nas DUAS janelas =======
+-- Drag nas duas janelas
 makeDraggable(window)
 makeDraggable(sub)
 
--- ====================================================================
--- =====================  LÓGICA TELEGUIADO / KICK  ====================
--- ====================================================================
-
+--======================== Lógica Teleguiado / Kick ========================--
 local LocalPlayer = Players.LocalPlayer
 
--- >>> tenta localizar a base. Ajuste os nomes conforme seu mapa.
+-- ACHAR BASE: ajuste aqui se sua base tiver nome específico
 local function findBaseCFrame()
-	-- 1) Base do jogador por nome
+	-- candidatos comuns
 	local candidates = {
 		("Base_%s"):format(LocalPlayer.Name),
 		("Base-%s"):format(LocalPlayer.Name),
 		("Base%s"):format(LocalPlayer.Name),
-		"Base", "BASE", "HomeBase", "PlayerBase"
+		"Base","BASE","HomeBase","PlayerBase"
 	}
 	for _, name in ipairs(candidates) do
 		local obj = workspace:FindFirstChild(name)
-		if obj and obj:IsA("BasePart") then
-			return obj.CFrame
-		elseif obj and obj:IsA("Model") and obj.PrimaryPart then
-			return obj.PrimaryPart.CFrame
+		if obj then
+			if obj:IsA("BasePart") then return obj.CFrame end
+			if obj:IsA("Model") then
+				if obj.PrimaryPart then return obj.PrimaryPart.CFrame end
+				for _, d in ipairs(obj:GetDescendants()) do
+					if d:IsA("BasePart") then return d.CFrame end
+				end
+			end
 		end
 	end
-	-- 2) Pasta Bases -> modelo/nó do jogador
+	-- pasta Bases/PlayerBases
 	local folder = workspace:FindFirstChild("Bases") or workspace:FindFirstChild("PlayerBases")
 	if folder then
 		local mine = folder:FindFirstChild(LocalPlayer.Name) or folder:FindFirstChild(("Base_%s"):format(LocalPlayer.Name))
 		if mine then
 			if mine:IsA("BasePart") then return mine.CFrame end
-			if mine:IsA("Model") and mine.PrimaryPart then return mine.PrimaryPart.CFrame end
-			-- pega primeiro BasePart dentro
-			for _, d in ipairs(mine:GetDescendants()) do
-				if d:IsA("BasePart") then return d.CFrame end
+			if mine:IsA("Model") then
+				if mine.PrimaryPart then return mine.PrimaryPart.CFrame end
+				for _, d in ipairs(mine:GetDescendants()) do
+					if d:IsA("BasePart") then return d.CFrame end
+				end
 			end
 		end
 	end
@@ -222,18 +231,19 @@ local function getCharStuff()
 	return char, hum, hrp
 end
 
--- >>> “usar” uma Taser no próprio boneco (se existir uma Tool com esse nome)
+-- “usar” Taser em si mesmo (se existir)
 local function taserSelf()
 	local char = LocalPlayer.Character
 	if not char then return end
-	local toolNames = {"Taser", "TaserGun", "Taser Gun", "Stun", "StunGun"}
+	local toolNames = {"Taser","TaserGun","Taser Gun","Stun","StunGun"}
 	local tool
+
 	-- procura no Character
 	for _, n in ipairs(toolNames) do
-		tool = char:FindFirstChild(n)
-		if tool and tool:IsA("Tool") then break end
+		local t = char:FindFirstChild(n)
+		if t and t:IsA("Tool") then tool = t break end
 	end
-	-- se não achou, procura no Backpack
+	-- ou no Backpack
 	if not tool then
 		local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
 		if bp then
@@ -244,15 +254,14 @@ local function taserSelf()
 			if tool then tool.Parent = char end
 		end
 	end
-	if tool and tool:IsA("Tool") and tool:FindFirstChild("Handle") then
-		-- ativa (visual/efeito do Tool, se existir)
+
+	if tool and tool:IsA("Tool") then
 		pcall(function() tool:Activate() end)
 	end
-	-- efeito básico: breves tremores/“taser”
+
+	-- efeito rapidinho (tremor)
 	local _, hum, hrp = getCharStuff()
-	if hum then
-		pcall(function() hum:ChangeState(Enum.HumanoidStateType.FallingDown) end)
-	end
+	if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.FallingDown) end) end
 	if hrp then
 		local t0 = tick()
 		RunService.Heartbeat:Wait()
@@ -263,10 +272,10 @@ local function taserSelf()
 	end
 end
 
--- >>> voar diretamente até a base
-local currentFlight -- tween/loop cancel token
+-- voo reto até a base
+local currentFlight
 local function flyStraightTo(cfTarget, speed)
-	speed = speed or 120 -- studs/seg
+	speed = speed or 140
 	local char, hum, hrp = getCharStuff()
 	if not (hum and hrp and cfTarget) then return end
 
@@ -274,89 +283,80 @@ local function flyStraightTo(cfTarget, speed)
 	if currentFlight then currentFlight.cancelled = true end
 	currentFlight = {cancelled = false}
 
-	-- “voando”: vamos ancorar para deslocar suave (simples e direto)
 	local prevAnchored = hrp.Anchored
 	local prevAutoRotate = hum.AutoRotate
 	hum.AutoRotate = false
 	hrp.Anchored = true
 
 	local arrived = false
-	local heartbeat = RunService.Heartbeat
-	local function dist(a, b) return (a - b).Magnitude end
+	local function distance(a, b) return (a - b).Magnitude end
 
 	while not currentFlight.cancelled do
 		local pos = hrp.Position
-		local goal = cfTarget.Position + Vector3.new(0, 5, 0) -- chegue 5 studs acima
+		local goal = cfTarget.Position + Vector3.new(0, 5, 0)
 		local d = goal - pos
-		local distance = d.Magnitude
-		if distance < 6 then
+		local dist = d.Magnitude
+		if dist < 6 then
 			arrived = true
 			break
 		end
-		local dt = heartbeat:Wait()
-		local step = math.min(distance, speed * dt)
-		hrp.CFrame = CFrame.new(pos + d.Unit * step, goal) -- olha pro alvo
+		local dt = RunService.Heartbeat:Wait()
+		local step = math.min(dist, speed * dt)
+		hrp.CFrame = CFrame.new(pos + d.Unit * step, goal)
 	end
 
 	-- restaurar
 	hrp.Anchored = prevAnchored
 	hum.AutoRotate = prevAutoRotate
 
-	-- chegou? dispara anti-kick se ativo
+	-- chegou na base? dispara kick no servidor se AutoKick ON
 	if arrived and getAutoKick and getAutoKick() then
-		-- pequena graça visual antes do kick
-		task.delay(0.1, function()
-			pcall(function()
-				LocalPlayer:Kick("voce coletou brainrot com sucesso")
-			end)
-		end)
+		KickRE:FireServer()
 	end
 end
 
--- >>> pipeline do Teleguiado: taser-se + voar pra base
+-- pipeline do Teleguiado
 local teleRunning = false
-local function runTeleGuiado()
+local function runTeleguiado()
 	if teleRunning then return end
 	teleRunning = true
-	-- 1) taser self
 	taserSelf()
-	-- 2) achar base
 	local baseCF = findBaseCFrame()
 	if not baseCF then
 		warn("[Teleguiado] Base não encontrada. Ajuste os nomes em findBaseCFrame().")
 		teleRunning = false
 		return
 	end
-	-- 3) voar até a base
 	flyStraightTo(baseCF, 140)
 	teleRunning = false
 end
 
--- ======= callbacks UI =======
+--=============== callbacks UI ===============--
 espGod.MouseButton1Click:Connect(function() end)
 espSecret.MouseButton1Click:Connect(function() end)
 espBase.MouseButton1Click:Connect(function() end)
 espPlayer.MouseButton1Click:Connect(function() end)
 
 -- abrir/fechar sub-gui
--- (já conectado acima)
-
--- ligar/desligar TELEGUIADO pela guizinha
-tTele.Button.MouseButton1Click:Connect(function()
-	-- o próprio toggle já alterna visual; aqui a gente dispara a ação se ficou ON
-	task.defer(function()
-		if tTele.Get() then
-			runTeleGuiado()
-		else
-			-- cancelar voo se estava em andamento
-			if currentFlight then currentFlight.cancelled = true end
-		end
-	end)
+painel.MouseButton1Click:Connect(function()
+	sub.Visible = not sub.Visible
+	if sub.Visible then
+		sub.Position = window.Position + UDim2.fromOffset(window.Size.X.Offset + 10, 0)
+	end
 end)
 
--- Aimbot: deixei sem lógica (você disse apenas o nome). Se quiser, implemento depois.
-tAimb.Button.MouseButton1Click:Connect(function()
-	-- lugar certo pra ativar/desativar seu aimbot
+-- TELEGUIADO: quando o toggle mudar
+tTele.Changed:Connect(function(on)
+	if on then
+		runTeleguiado()
+	else
+		if currentFlight then currentFlight.cancelled = true end
+	end
+end)
+
+-- AIMBOT: pronto para ligar/desligar se você quiser implementar depois
+tAimb.Changed:Connect(function(on)
+	-- ligar/desligar sua lógica de AIMBOT aqui
 end)
 
 -- estados iniciais
